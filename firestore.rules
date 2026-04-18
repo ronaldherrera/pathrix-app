@@ -1,0 +1,108 @@
+// ============================================================
+// PATHRIX - Firestore Security Rules (Client-Side Architecture)
+// ============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helpers
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+
+    // ── Users ────────────────────────────────────────────────
+    match /users/{uid} {
+      // Anyone authenticated can read profiles (leaderboard, friend search)
+      allow read: if isAuth();
+      // Creation at registration
+      allow create: if isOwner(uid);
+      // Only owner can update profile settings and display info
+      // OR others can add/remove THEMSELVES from this user's friend list
+      allow update: if isOwner(uid) || (
+        isAuth() && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['friendIds', 'lastSeenAt']) &&
+        (
+          // Case Add: caller adds themselves to list
+          (request.resource.data.friendIds.hasAll(resource.data.friendIds) && request.auth.uid in request.resource.data.friendIds) ||
+          // Case Remove: caller removes themselves from list
+          (resource.data.friendIds.hasAll(request.resource.data.friendIds) && !(request.auth.uid in request.resource.data.friendIds))
+        )
+      );
+      allow delete: if isOwner(uid);
+    }
+
+    // ── Username Reservations ────────────────────────────────
+    match /usernames/{nameLower} {
+      allow read: if isAuth();
+      allow create: if isAuth() && request.resource.data.uid == request.auth.uid;
+      allow update: if false; 
+      allow delete: if isAuth() && resource.data.uid == request.auth.uid;
+    }
+
+    // ── Matches ───────────────────────────────────────────────
+    match /matches/{matchId} {
+      // Participants can read the match (supports array-contains queries)
+      allow read: if isAuth() && (
+        request.auth.uid in resource.data.get('playerUids', []) ||
+        resource.data.playerCyanId == request.auth.uid ||
+        resource.data.playerOrangeId == request.auth.uid
+      );
+      // Participants can create a match (Friend Challenge or Matchmaking)
+      allow create: if isAuth() && (
+        request.resource.data.playerCyanId == request.auth.uid ||
+        request.resource.data.playerOrangeId == request.auth.uid
+      );
+      // Participants can update the match state
+      allow update: if isAuth() && (
+        request.auth.uid == resource.data.playerCyanId ||
+        request.auth.uid == resource.data.playerOrangeId
+      ) && (
+        // Ensure they don't change who the players are
+        request.resource.data.playerCyanId == resource.data.playerCyanId &&
+        request.resource.data.playerOrangeId == resource.data.playerOrangeId
+      );
+      
+      // Chat
+      match /chat/{msgId} {
+        allow read, create: if isAuth() && (
+          get(/databases/$(database)/documents/matches/$(matchId)).data.playerCyanId == request.auth.uid ||
+          get(/databases/$(database)/documents/matches/$(matchId)).data.playerOrangeId == request.auth.uid
+        );
+      }
+    }
+
+    // ── Matchmaking Queue ─────────────────────────────────────
+    match /matchmakingQueue/{uid} {
+      allow read: if isAuth();
+      allow create: if isOwner(uid);
+      // Allow others to update only when matching (marking as matched)
+      allow update: if isOwner(uid) || (isAuth() && request.resource.data.status == 'matched');
+      allow delete: if isOwner(uid);
+    }
+
+    // ── Friend Requests ───────────────────────────────────────
+    match /friendRequests/{requestId} {
+      allow read: if isAuth() && (request.auth.uid == resource.data.fromUid || request.auth.uid == resource.data.toUid);
+      allow create: if isAuth() && request.resource.data.fromUid == request.auth.uid;
+      allow update, delete: if isAuth() && (request.auth.uid == resource.data.fromUid || request.auth.uid == resource.data.toUid);
+    }
+
+    // ── Friend Challenges ─────────────────────────────────────
+    match /friendChallenges/{challengeId} {
+      allow read: if isAuth() && (request.auth.uid == resource.data.fromUid || request.auth.uid == resource.data.toUid);
+      allow create: if isAuth() && request.resource.data.fromUid == request.auth.uid;
+      allow update, delete: if isAuth() && (request.auth.uid == resource.data.fromUid || request.auth.uid == resource.data.toUid);
+    }
+
+    // ── AI Learned Stats (HumanLearner) ───────────────────────
+    match /ai/humanProfile {
+      allow read: if true;
+      allow write: if isAuth(); // HumanLearner updates based on player moves
+    }
+  }
+}
